@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE OverloadedStrings #-}
 module Types
     ( Game(..),
       Card(..),
@@ -7,12 +8,14 @@ module Types
       Hand,
       Turn(..),
       GameRep(..),
-      Command
+      Command(..),
     ) where
 
 import Data.MultiSet 
 import qualified Data.Map as M
 import qualified Data.Text as T
+import Data.Monoid
+import Control.Applicative ((<|>))
 import Data.Aeson
 import GHC.Generics
 
@@ -25,6 +28,7 @@ type Hand = MultiSet Card
 
 data Game = Game { activePlayer :: Player,
                    hands :: M.Map Player Hand,
+                   sixes :: M.Map Player Int,
                    stack :: [Card],
                    gameOver :: Bool,
                    winner :: Player}
@@ -35,6 +39,7 @@ data Turn = PlayCard Card |
             TakeCard |
             Knock |
             Surrender
+        deriving (Generic, ToJSON, FromJSON)
 
 instance Show Turn where
         show (PlayCard c) = "Play " ++ show c
@@ -50,5 +55,5 @@ data GameRep = GameRep {nOtherHand :: Int,
                         ownHand :: [Card]}
         deriving (Show, Generic, ToJSON, FromJSON)
 
-data Command = Command {cMove :: T.Text}
+data Command = Command {origin :: T.Text, move :: Turn}
         deriving (Show, Generic, ToJSON, FromJSON)

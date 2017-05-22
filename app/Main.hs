@@ -1,47 +1,47 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Main where
 
-
---import           Network.HTTP.Client      (newManager, Manager, httpLbs, withResponse, parseRequest)
---import           Network.HTTP.Client.TLS  (tlsManagerSettings)
---import           Web.Telegram.API.Bot
---import           Network.CGI
---import           Network.FastCGI (runFastCGIorCGI)
---import           Data.Time (getCurrentTime)
---import           Data.Time.Format (formatTime, defaultTimeLocale)
---import           Text.Printf (printf)
---import           Data.Aeson
-import           System.IO.Unsafe (unsafePerformIO)
---import           Data.Monoid
---import qualified Data.ByteString.Lazy.Char8 as BS
+import System.IO.Unsafe (unsafePerformIO)
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
---import qualified Data.Text.Lazy as TL
---import qualified Data.Text.Lazy.Builder as TB
---import qualified Data.Text.Lazy.Builder.Int as TB
 import qualified Data.Map as M
 import qualified Data.Bimap as BM
+import qualified Data.Attoparsec.Text as AP
+import qualified Data.ByteString.Lazy as BSL
+import qualified Data.ByteString.Base64.Lazy as BSL
+import qualified Data.ByteString as BS
+import Network.HTTP.Types.Status (badRequest400)
+import Data.Aeson (decode, encode)
 import Web.Spock
 import Web.Spock.Config
+import Network.Wai.Middleware.Static
+import Network.Wai.Middleware.RequestLogger
 import Control.Monad.Trans
+import Control.Lens hiding (element)
 import Data.Monoid
+import Data.Maybe
+import Data.Char (chr)
+import Data.Time.Clock
 import Data.IORef
-import System.Random (getStdGen)
+import System.Random
 
 import Elements
 import Types
 
 configPath = "/home/chicken/.elements.cfg"
 
-data Session = Session {sessionID :: Int,
-                        gameState :: Game,
-                        players :: BM.Bimap Player T.Text} -- maps players to telegram (or client) ids
+data GameSession = GameSession {gameState :: Game, players :: BM.Bimap PlayerID Player} -- maps players to telegram (or client) ids
+    deriving (Show)
 
-data ElementsState = ElementsState {games :: M.Map Int Game, ngames :: Int}
+data ElementsState = ElementsState {games :: M.Map Int GameSession, ngames :: Int}
+    deriving (Show)
+
 data MySession = EmptySession
 data MyAppState = DummyAppState (IORef ElementsState)
+type PlayerID = T.Text
 
 
 rng = unsafePerformIO $ getStdGen
@@ -53,7 +53,10 @@ main = do ref <- newIORef $ ElementsState M.empty 0
 
 app :: SpockM () MySession MyAppState ()
 app =
-    do get root $
+    do
+       middleware $ logStdoutDev
+       middleware $ staticPolicy (addBase "static")
+       get root $
            text "Hello World!"
 --       get ("hello" <//> var) $ \name ->
 --           do (DummyAppState ref) <- getState
@@ -61,108 +64,66 @@ app =
 --              text ("Hello " <> name <> ", you are visitor number " <> T.pack (show visitorNumber))
        get ("game/new") $ 
            do (DummyAppState ref) <- getState
-              newGameID <- liftIO $ atomicModifyIORef' ref addNewGame
+              newGameID <- liftIO $ atomicModifyIORef' ref $ addNewGame rng "dummyID"--TODO: insert player id from request
               redirect $ "/game/" <> (T.pack $ show newGameID)
        get ("game" <//> var) $ \gameID ->
            do (DummyAppState ref) <- getState
               state <- liftIO $ readIORef ref
               case M.member gameID $ games state of
-                        True -> text "Game exists, hurray"
-                        False -> text "Game does not exist"
-       post ("game" <//> var) $ \command ->
-        do (DummyAppState ref) <- getState
-           response <- liftIO $ atomicModifyIORef' ref $ processCommand command
-           json response
+                        True -> do
+                            pid <- getOrSetIdentifier
+                            --json pid
+                            let (Just session) = M.lookup gameID $ games state
+                            case BM.ismember pid $ players session
+                                True -> 
+                                False -> redirect "/"
+                            --redirect "/"
+                        False -> redirect "/"
+       post ("game" <//> var) $ \gameID ->
+            do (DummyAppState ref) <- getState
+               b <- body
+               liftIO $ BS.putStrLn b
+               let c = decode $ BSL.fromStrict b :: Maybe Command
+               liftIO $ print c
+               let d = gameID :: Int
+               liftIO $ print gameID
+               case c of
+                    Just command -> do
+                        response <- liftIO $ atomicModifyIORef' ref $ processCommand gameID command
+                        json response
+                    Nothing -> do
+                        setStatus badRequest400
 
+getOrSetIdentifier = do
+    pid <- cookie "pid"
+    case pid of
+        (Just x) -> return x
+        --Nothing -> return "testor"
+        Nothing -> do
+            let pid' = T.pack $ take 32 $ randomRs ('a', 'z') $ unsafePerformIO newStdGen
+            --setCookie "pid" pid' (fromInteger (3600*48))
+            setCookie "pid" pid' defaultCookieSettings
+            return pid'
 
-
-addNewGame :: ElementsState -> (ElementsState, Int)
-addNewGame state = (state', newID)
+addNewGame :: StdGen -> PlayerID -> ElementsState -> (ElementsState, Int)
+addNewGame rng pid state = (state', newID)
         where game = newGame $ shuffleDeck rng
               newID = (+1) $ ngames state
-              state' = state {ngames = newID, games = games state <> M.singleton newID game} :: ElementsState
+              rand = fst $ random rng :: Int
+              playerPosition = if even rand then PlayerOne else PlayerTwo
+              newSession = GameSession game $ BM.singleton pid playerPosition
+              state' = state {ngames = newID, games = games state <> M.singleton newID newSession} :: ElementsState
 
-processCommand :: Command -> ElementsState -> (ElementsState, GameRep)
-processCommand = undefined
+processCommand :: Int -> Command -> ElementsState -> (ElementsState, GameRep)
+processCommand gameID c state = (state {games = sessions'}, rep)
+    where (Just session) = M.lookup gameID $ games state
+          game = gameState session
+          turn = move c
+          game' = applyValidTurn game turn
+          session' =  if hasTwoPlayers session then session {gameState = game'} else session
+          sessions' = M.insert gameID session' $ games state
+          player = PlayerOne
+          rep = renderGame game' player
 
-
---main :: IO ()
---main = do
---  (Just config) <- decode <$> BS.readFile configPath :: IO (Maybe Config)
---  manager <- newManager tlsManagerSettings
---  res <- getMe (token config) manager
---  case res of
---    Left e -> do
---      print e
---    Right Response { result = u } -> do
---      print $ "My name is " <> user_first_name u
---  updateLoop config manager 1
---
---
----- bot main loop
---updateLoop :: Config -> Manager -> Int -> IO ()
---updateLoop config@Config{..} manager offset = do
---        res <- getUpdates token (Just offset) (Just 1) (Just timeout) manager
---        case res of
---                Left e -> do
---                        updateLoop config manager offset
---                Right Response { result = [Update {update_id = last_offset, message = msg}]} -> do
---                        putStrLn $ show last_offset
---                        case msg of
---                                Just m -> dispatchMessage config manager m
---                                Nothing -> return ()
---                        updateLoop config manager (last_offset + 1)
---
----- main dispatcher
---dispatchMessage :: Config -> Manager -> Message -> IO ()
---dispatchMessage config@Config{..} manager Message { text = Just body, chat = Chat {chat_id = chatid} } = do
---        print "received message:"
---        print body
---        case T.stripPrefix "/" body of
---                Nothing -> return ()
---                Just x -> do
---                        print "Command Detected:"
---                        let args = T.splitOn " " x
---                        let cmd = head args
---                        let action = dispatchLookup $ T.toLower cmd
---                        print cmd
---                        response <- action config args
---                        case response of
---                                Nothing -> return ()
---                                Just t -> do
---                                        let cid = TL.toStrict $ TB.toLazyText $ TB.decimal chatid
---                                        let req = sendMessageRequest cid t
---                                        sendMessage token req manager
---                                        return ()
-----ignore all other message types
---dispatchMessage _ _ _ = do
---                        print "Ignoring invalid messages"
---                        return ()
---
---dispatchTable :: M.Map T.Text (Config -> [T.Text] -> IO (Maybe T.Text))
---dispatchTable = M.fromAscList [("log", logAction), ("yt", YT.youtubeAction)]
---
---dispatchLookup x = M.findWithDefault emptyAction x dispatchTable
---
---emptyAction :: Config -> [T.Text] -> IO (Maybe T.Text)
---emptyAction _ (x:_) = do
---        return $ Just $ "no action for \"" <> x <> "\"."
---
----- weight log part
---logAction :: Config -> [T.Text] -> IO (Maybe T.Text)
---logAction _ (_:a:_) = do
---                case double a of
---                        Right (x,_) -> do
---                                        addWeight x
---                                        return $ Just "added data point"
---                        _ -> return Nothing
---
---
---addCsv :: FilePath -> String -> Double -> IO ()
---addCsv file formatString x = do
---        datestring <- formatTime defaultTimeLocale "%Y-%m-%d" <$> getCurrentTime
---        appendFile file $ printf formatString datestring x
---
---addWeight :: Double -> IO ()
---addWeight = addCsv  "/home/chicken/html/gewichtlog.tsv" "%s\t\t%.1f\n"
---
+hasTwoPlayers :: GameSession -> Bool
+hasTwoPlayers = ((==) 2) . BM.size . players

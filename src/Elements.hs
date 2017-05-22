@@ -4,6 +4,7 @@ module Elements
     ( newGame,
       parseTurn,
       shuffleDeck,
+      applyValidTurn,
       turnLogic,
       Game(..),
       Player(..),
@@ -33,10 +34,11 @@ shuffleDeck :: RandomGen gen => gen -> [Card]
 shuffleDeck g = shuffle' deck (length deck) g
 
 newGame :: [Card] -> Game
-newGame deck = Game PlayerOne hs [] False Neither
+newGame deck = Game PlayerOne hs sixes [] False Neither
         where h1 = MS.fromList $ take 6 deck
               h2 = MS.fromList $ take 6 $ drop 6 deck
               hs = M.fromList $ [(PlayerOne, h1), (PlayerTwo, h2)]
+              sixes = M.fromList $ [(PlayerOne, 0), (PlayerTwo, 0)]
 
 game = newGame $ shuffleDeck rng
 
@@ -67,9 +69,13 @@ removeFromHand g p c = applyToHand g p (MS.delete c)
 performTurn :: Game -> Turn -> Game
 performTurn g t = if moveIsValid g t then turnLogic g t else error "invalid turn"
 
+applyValidTurn :: Game -> Turn -> Game
+applyValidTurn g t = if moveIsValid g t then turnLogic g t else g
+
 turnLogic :: Game -> Turn -> Game
 turnLogic g@Game{..} (PlayCard c) = nextPlayer $ removeFromHand (g {stack=c:stack}) activePlayer c
-turnLogic g@Game{..} (DiscardSix) = nextPlayer $ removeFromHand g activePlayer 6
+turnLogic g@Game{..} (DiscardSix) = nextPlayer $ game' {sixes = M.adjust ((+) 1) activePlayer sixes}
+        where game' = removeFromHand g activePlayer 6
 turnLogic g@Game{..} (TakeCard) = nextPlayer $ addToHand (g {stack=stack'}) activePlayer topCard
               where (topCard:stack') = stack
 turnLogic g@Game{..} (Knock) = g {gameOver = True, winner = winner'}
@@ -82,7 +88,7 @@ turnLogic g@Game{..} (Surrender) = g {gameOver = True, winner = otherPlayer acti
 
 
 moveIsValid :: Game -> Turn -> Bool
-moveIsValid (Game _ _ _ True _)  _ = False
+moveIsValid (Game _ _ _ _ True _)  _ = False
 moveIsValid g@Game{..} (PlayCard c) = MS.member c $ getPlayerHand g activePlayer
 moveIsValid g@Game{..} DiscardSix = MS.member 6 $ getPlayerHand g activePlayer
 moveIsValid g@Game{..} TakeCard = not $  (==) [] stack
@@ -121,9 +127,9 @@ showGame g@Game{..} p = concat $ intersperse "\n\n" $ (show activePlayer):lines
               stack' = show $ reverse stack
 
 renderGame :: Game -> Player -> GameRep
-renderGame g@Game{..} p = GameRep {nOtherSixes = 0,
+renderGame g@Game{..} p = GameRep {nOtherSixes = M.findWithDefault 0 p' sixes,
                                    nOtherHand = MS.size $ getPlayerHand g p',
-                                   nOwnSixes = 0,
+                                   nOwnSixes = M.findWithDefault 0 p' sixes,
                                    ownHand = MS.toList $ getPlayerHand g p,
                                    limit = stack}
         where p' = otherPlayer p

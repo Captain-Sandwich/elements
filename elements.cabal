@@ -36,8 +36,17 @@ executable elements-exe
                        text,
                        mtl,
                        Spock,
+                       wai-middleware-static,
+                       wai-extra,
                        random,
                        containers,
+                       attoparsec,
+                       bytestring,
+                       base64-bytestring >= 1.0,
+                       aeson,
+                       http-types,
+                       lens,
+                       time,
                        elements
   default-language:    Haskell2010
 
